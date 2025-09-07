@@ -30,6 +30,7 @@ class NvisiiScene():
         self.monodepth_paths = self.find_monodepth_paths()
         self.equipment_ids = self.parse_equipment_ids()
         self.equipment_poses = self.parse_equipment_poses()
+        self.observability_paths = self.find_observability_paths()
 
         if self.labeled:
             self.segmentation_paths = self.find_segmentation_paths()
@@ -190,6 +191,17 @@ class NvisiiScene():
             assembly_paths_dict.update(dict_item)
 
         return assembly_paths_dict
+    
+    def find_observability_paths(self):
+        observability_paths = glob.glob(os.path.join(self.root, 'observability', '*.yaml'))
+        observability_paths.sort()
+        observability_paths_dict = {}
+        for observability_path in observability_paths:
+            observability_id = int(os.path.basename(observability_path).split('.')[0])
+            dict_item = {observability_id: observability_path}
+            observability_paths_dict.update(dict_item)
+
+        return observability_paths_dict
 
     def exception_handler(func):
         def wrapper(*args, **kwargs):
@@ -329,6 +341,17 @@ class NvisiiScene():
             dict_item = {img_idx: depth}
             self.depths.update(dict_item)
         return self.depths[img_idx]
+    
+    @exception_handler
+    def get_observability(self, img_idx):
+        self.check_img_idx_arg(img_idx)
+        try:
+            yaml_file = self.observability_paths[img_idx]
+            with open(yaml_file) as f:
+                observability = yaml.safe_load(f)
+            return observability
+        except:
+            return None
 
     def check_img_idx_arg(self, img_idx):
         assert img_idx in self.get_img_ids(), 'img_idx out of range'
