@@ -28,7 +28,7 @@ class NvisiiScene():
         self.camera_intrinsics = self.parse_camera_intrinsics()
         self.img_paths = self.find_img_paths()
         self.monodepth_paths = self.find_monodepth_paths()
-        self.equipment_ids = self.parse_equipment_ids()
+        self.present_equipment_names = self.parse_equipment_ids()
         self.equipment_poses = self.parse_equipment_poses()
         self.observability_paths = self.find_observability_paths()
 
@@ -36,21 +36,6 @@ class NvisiiScene():
             self.segmentation_paths = self.find_segmentation_paths()
             self.equipment_point_paths = self.find_equipment_point_paths()
             self.depth_paths, self.depth_bounds_paths = self.find_depth_paths()
-
-        # If we have fewer monodepth images, remove the additional items from all other lists
-        # if len(self.monodepth_paths) < len(self.img_paths):
-        #     img_ids = list(self.img_paths.keys())
-        #     for img_id in img_ids:
-        #         if img_id not in self.monodepth_paths.keys():
-        #             del self.camera_poses[img_id]
-        #             del self.camera_intrinsics[img_id]
-        #             del self.img_paths[img_id]
-        #             if self.labeled:
-        #                 del self.segmentation_paths[img_id]
-        #                 del self.equipment_point_paths[img_id]
-        #                 del self.depth_paths[img_id]
-        #                 del self.depth_bounds_paths[img_id]
-
 
         if self.real_assemblies:
             self.assembly_paths = self.find_assembly_paths()
@@ -76,7 +61,8 @@ class NvisiiScene():
     def parse_equipment_ids(self):
         with open(os.path.join(self.root, 'entity_ids.yaml')) as f:
             equipment_ids = yaml.safe_load(f)
-        return equipment_ids
+            equipment_names = list(equipment_ids.keys())
+        return equipment_names
 
     def parse_equipment_poses(self):
         equipment_poses = {}
@@ -217,13 +203,7 @@ class NvisiiScene():
 
     @exception_handler
     def get_present_equipment_names(self):
-        return list(self.equipment_ids.keys())
-
-    @exception_handler
-    def get_equipment_id(self, equipment_name=None):
-        if equipment_name is None:
-            equipment_name = self.get_present_equipment_names()[0]
-        return self.equipment_ids[equipment_name]
+        return self.present_equipment_names
 
     @exception_handler
     def get_equipment_pose(self, equipment_name=None, img_idx=0):
@@ -276,16 +256,6 @@ class NvisiiScene():
         return self.monodepths[img_idx]
 
     @exception_handler
-    def get_segmentation(self, img_idx):
-        self.check_img_idx_arg(img_idx)
-        if img_idx not in self.segmentations:
-            f = gzip.GzipFile(self.segmentation_paths[img_idx], "r")
-            segmentation = np.load(f)
-            dict_item = {img_idx: segmentation}
-            self.segmentations.update(dict_item)
-        return self.segmentations[img_idx]
-
-    @exception_handler
     def get_equipment_points_norm(self, img_idx):
         self.check_img_idx_arg(img_idx)
         if img_idx not in self.equipment_points:
@@ -301,16 +271,10 @@ class NvisiiScene():
 
     @exception_handler
     def get_segmentation_binary(self, img_idx, entity_ids):
-        segmentation = self.get_segmentation(img_idx)
-        segmentation_binary = np.zeros(segmentation.shape, dtype=np.uint8)
-        for entity_id in entity_ids:
-            segmentation_binary[segmentation == entity_id] = 1
-        return segmentation_binary
-
-    @exception_handler
-    def get_segmentation_binary_full_extents(self, img_idx):
-        equipment_point_img = self.get_equipment_points_norm(img_idx)
-        return np.any(equipment_point_img > 0.0, axis=2)
+        self.check_img_idx_arg(img_idx)
+        depth = self.get_depth(img_idx)
+        segmentation = depth > 0.0
+        return segmentation
 
     @exception_handler
     def get_depth(self, img_idx):
@@ -365,84 +329,9 @@ class NvisiiScene():
             dict_item = {img_idx: assembly_pred}
             self.assembly_predictions.update(dict_item)
         return self.assembly_predictions[img_idx]
-    
-    @exception_handler
-    def get_visible_parts(self, img_idx):
-        self.check_img_idx_arg(img_idx)
-        try:
-            # Get part colors
-            with open(os.path.join(self.root, 'entity_ids.yaml')) as f:
-                equipment_data = yaml.safe_load(f)
-
-            # Get observed colors
-            seg_dir = self.segmentation_paths[img_idx]            
-            seg_file = gzip.GzipFile(seg_dir)
-            img = np.load(seg_file)
-            all_unique_colors = (np.unique(img)).tolist()
-
-            # Make visible part label (corresponding to assembly state label)
-            visible_parts = [k for k, v in equipment_data.items() if v in all_unique_colors]
-
-            return visible_parts
-        except:
-            return [] # This means None (return empty dict)
-
-    def get_absent_but_observable_parts(self, img_idx):
-        ''' Returns parts that are absent but would be visible if they were present'''
-        self.check_img_idx_arg(img_idx)
-        try:
-            yaml_file = os.path.join(self.root, 'observable_parts', 'absent_but_would_be_visible_' + str(img_idx).zfill(5) + '.yaml')
-            with open(yaml_file) as f:
-                absent_but_observable_parts = yaml.safe_load(f)
-            return absent_but_observable_parts
-        except:
-            return None
-
-    def get_present_and_observable_parts(self, img_idx):
-        ''' Returns parts that are present and visible'''
-        self.check_img_idx_arg(img_idx)
-        try:
-            yaml_file = os.path.join(self.root, 'observable_parts', 'present_and_visible_' + str(img_idx).zfill(5) + '.yaml')
-            with open(yaml_file) as f:
-                absent_but_observable_parts = yaml.safe_load(f)
-            return absent_but_observable_parts
-        except:
-            return None
         
     def set_part_names(self, part_names):
         self.part_names = part_names
-
-    def get_absent_and_not_observable_parts(self, img_idx):
-        ''' Returns parts that are absent and would not be visible if they were present'''
-        self.check_img_idx_arg(img_idx)
-        if self.part_names == []:
-            raise ValueError('Part names must be provided')
-        absent_but_observable = set(self.get_absent_but_observable_parts(img_idx))
-        all_parts = set(self.part_names)
-        present_parts = set(self.get_present_equipment_names())
-        absent_parts = all_parts - present_parts
-        absent_and_not_observable_parts = list(absent_parts - absent_but_observable)
-        return absent_and_not_observable_parts
-    
-    def get_present_and_not_observable_parts(self, img_idx):
-        ''' Returns parts that are present and not visible'''
-        self.check_img_idx_arg(img_idx)
-        if self.part_names == []:
-            raise ValueError('Part names must be provided')
-        present_and_observable = set(self.get_present_and_observable_parts(img_idx))
-        present_parts = set(self.get_present_equipment_names())
-        present_and_not_observable_parts = list(present_parts - present_and_observable)
-        return present_and_not_observable_parts
-    
-    def part_names_to_binary_array(self, part_names):
-        binary_array = np.zeros(len(self.part_names))
-        if self.part_names == []:
-            raise ValueError('Part names must be provided')
-        binary_array = np.zeros(len(self.part_names))
-        for i in range(len(self.part_names)):
-            if self.part_names[i] in part_names:
-                binary_array[i] = 1
-        return binary_array
 
 
 class DatasetPhaseNvisii():
