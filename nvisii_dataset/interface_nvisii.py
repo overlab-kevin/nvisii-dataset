@@ -272,8 +272,10 @@ class NvisiiScene():
     @exception_handler
     def get_segmentation_binary(self, img_idx, entity_ids):
         self.check_img_idx_arg(img_idx)
-        depth = self.get_depth(img_idx)
-        segmentation = depth > 0.0
+        equip_points_img = self.get_equipment_points_norm(img_idx)
+        # segment based on pixels that are not black
+        segmentation = np.zeros(equip_points_img.shape[:2], dtype=np.uint8)
+        segmentation[np.where((equip_points_img[:,:,0] > 0) | (equip_points_img[:,:,1] > 0) | (equip_points_img[:,:,2] > 0))] = 255
         return segmentation
 
     @exception_handler
@@ -301,6 +303,10 @@ class NvisiiScene():
             y_over_z = (py - cy) / fy
 
             depth = distance / np.sqrt(1. + x_over_z**2 + y_over_z**2)
+
+            # Apply the segmentation mask
+            segmentation = self.get_segmentation_binary(img_idx, self.get_present_equipment_names())
+            depth[segmentation == 0] = 0.0
 
             dict_item = {img_idx: depth}
             self.depths.update(dict_item)
