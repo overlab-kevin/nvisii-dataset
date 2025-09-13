@@ -474,3 +474,150 @@ def validate_transforms(equipment_renderer, equipment_to_camera):
     color, depth = equipment_renderer.render_object_pose(equipment_to_camera)
     return color
 
+# -------------- Visualization utilities and CLI --------------
+def _colorize_metric_depth(depth_m, cmap=cv2.COLORMAP_INFERNO):
+    """
+    Convert a metric depth map (float32 meters, zeros as invalid) to a color image for display.
+    """
+    if not isinstance(depth_m, np.ndarray) or depth_m.size == 0:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+
+    if depth_m.ndim == 3:
+        depth_m = depth_m.squeeze()
+
+    mask = depth_m > 0
+    if np.any(mask):
+        d_valid = depth_m[mask]
+        vmin = float(np.percentile(d_valid, 2.0))
+        vmax = float(np.percentile(d_valid, 98.0))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            vmin = float(d_valid.min()) if d_valid.size > 0 else 0.0
+            vmax = float(d_valid.max()) if d_valid.size > 0 else 1.0
+
+        norm = np.zeros_like(depth_m, dtype=np.float32)
+        norm[mask] = np.clip((depth_m[mask] - vmin) / max(1e-6, (vmax - vmin)), 0.0, 1.0)
+        u8 = (norm * 255.0).astype(np.uint8)
+    else:
+        u8 = np.zeros_like(depth_m, dtype=np.uint8)
+
+    color = cv2.applyColorMap(u8, cmap)
+    # set invalid pixels to black
+    if color.ndim == 3:
+        color[~mask] = (0, 0, 0)
+    return color
+
+
+def _to_u8_bgr(img, fallback_shape):
+    """
+    Convert an arbitrary image-like array to uint8 BGR for display.
+    fallback_shape: (H, W, 3) used when img is invalid.
+    """
+    if isinstance(img, np.ndarray) and img.size > 0:
+        arr = img
+        if arr.dtype in (np.float32, np.float64):
+            # assume in [0,1], clip then scale
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = (arr * 255.0).astype(np.uint8)
+        else:
+            if arr.ndim == 2:
+                pass  # keep as is; may be grayscale
+            elif arr.ndim == 3 and arr.shape[2] == 3:
+                pass  # already BGR likely
+            else:
+                # best effort squeeze
+                arr = np.squeeze(arr)
+                if arr.ndim == 2:
+                    pass
+                else:
+                    return np.zeros(fallback_shape, dtype=np.uint8)
+
+        if arr.ndim == 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        return arr.astype(np.uint8)
+    else:
+        return np.zeros(fallback_shape, dtype=np.uint8)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize NVISII dataset modalities with OpenCV")
+    parser.add_argument("dataset", help="Path to dataset root directory")
+    parser.add_argument("phase", help="Dataset phase subfolder under root (e.g., train, val, test)")
+    parser.add_argument("--wait", type=int, default=0, help="waitKey delay in ms (0=wait for key each image)")
+    parser.add_argument("--scene-start", type=int, default=0, help="Start scene index (inclusive)")
+    parser.add_argument("--scene-end", type=int, default=None, help="End scene index (exclusive)")
+    args = parser.parse_args()
+
+    ds = DatasetPhaseNvisii(args.dataset, args.phase, static_equipment=True, real_assemblies=False)
+    n_scenes = ds.num_scenes()
+    start = max(0, args.scene_start)
+    end = n_scenes if args.scene_end is None else min(n_scenes, max(args.scene_start, args.scene_end))
+
+    print(f"Loaded dataset at: {args.dataset} | phase: {args.phase} | scenes: {n_scenes}")
+    print("Controls: press any key to advance to the next image, 'q' or Esc to quit.")
+
+    for s_idx in range(start, end):
+        scene = ds.get_scene(s_idx, labeled=True)
+        scene_dir = scene.get_scene_dir_name()
+        scene_name = os.path.basename(scene_dir) if isinstance(scene_dir, str) else f"scene_{s_idx}"
+        img_ids = scene.get_img_ids()
+        if not isinstance(img_ids, list) or len(img_ids) == 0:
+            continue
+        img_ids = sorted(img_ids)
+
+        for img_id in img_ids:
+            rgb = scene.get_img(img_id)
+            if not isinstance(rgb, np.ndarray) or rgb.size == 0:
+                # nothing to show for this image
+                continue
+            h, w = rgb.shape[:2]
+
+            monodepth = scene.get_monodepth(img_id)
+            if isinstance(monodepth, np.ndarray) and monodepth.size > 0:
+                if monodepth.ndim == 3 and monodepth.shape[2] == 3:
+                    mono_gray = cv2.cvtColor(monodepth, cv2.COLOR_BGR2GRAY)
+                else:
+                    mono_gray = monodepth.astype(np.uint8)
+                mono_norm = cv2.normalize(mono_gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                monodepth_vis = cv2.applyColorMap(mono_norm, cv2.COLORMAP_INFERNO)
+            else:
+                monodepth_vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+            equip = scene.get_equipment_points_norm(img_id)
+            if isinstance(equip, np.ndarray) and equip.size > 0:
+                equip_vis = _to_u8_bgr(equip, (h, w, 3))
+            else:
+                equip_vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+            seg = scene.get_segmentation_binary(img_id, scene.get_present_equipment_names())
+            if isinstance(seg, np.ndarray) and seg.size > 0:
+                if seg.ndim == 3 and seg.shape[2] == 3:
+                    seg_gray = cv2.cvtColor(seg, cv2.COLOR_BGR2GRAY)
+                else:
+                    seg_gray = seg
+                seg_vis = cv2.cvtColor(seg_gray.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+            else:
+                seg_vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+            depth_m = scene.get_depth(img_id)
+            if isinstance(depth_m, np.ndarray) and depth_m.size > 0:
+                depth_vis = _colorize_metric_depth(depth_m)
+            else:
+                depth_vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+            title_prefix = f"[{args.phase}] {scene_name} | img {img_id}"
+            cv2.imshow("RGB", rgb)
+            cv2.imshow("Monocular Depth ", monodepth_vis)
+            cv2.imshow("Equipment Points", equip_vis)
+            cv2.imshow("Segmentation", seg_vis)
+            cv2.imshow("Depth (m)", depth_vis)
+
+            key = cv2.waitKey(args.wait if args.wait > 0 else 0) & 0xFF
+            if key in (27, ord("q"), ord("Q")):
+                cv2.destroyAllWindows()
+                return
+
+    print("Visualization complete.")
+
+
+if __name__ == "__main__":
+    main()
