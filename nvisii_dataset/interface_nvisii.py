@@ -13,6 +13,7 @@ import glob
 import yaml
 import gzip
 import argparse
+import copy
 
 import trimesh
 
@@ -538,6 +539,45 @@ def _to_u8_bgr(img, fallback_shape):
         return np.zeros(fallback_shape, dtype=np.uint8)
 
 
+def _parse_observability_map(obs):
+    """
+    Try to convert a loosely-defined YAML object into a mapping {object_name: score|bool}.
+    Accepts direct mappings or nested under common keys.
+    """
+    mapping = {}
+    if obs is None:
+        return mapping
+    if not isinstance(obs, dict):
+        return mapping
+
+    # Try common container keys
+    for key in ("observability", "objects", "entities", "equipment", "per_object", "per_entity", "scores"):
+        if key in obs and isinstance(obs[key], dict):
+            obs = obs[key]
+            break
+
+    # If still not a mapping of name->val, give up
+    if not isinstance(obs, dict):
+        return mapping
+
+    def _to_score(v):
+        if isinstance(v, bool):
+            return 1.0 if v else 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, dict):
+            for k in ("observability", "score", "visible", "visibility", "prob", "probability", "p_obs"):
+                if k in v:
+                    return _to_score(v[k])
+        return None
+
+    for name, v in obs.items():
+        sv = _to_score(v)
+        if sv is not None:
+            mapping[str(name)] = sv
+    return mapping
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize NVISII dataset modalities with OpenCV")
     parser.add_argument("dataset", help="Path to dataset root directory")
@@ -545,6 +585,7 @@ def main():
     parser.add_argument("--wait", type=int, default=0, help="waitKey delay in ms (0=wait for key each image)")
     parser.add_argument("--scene-start", type=int, default=0, help="Start scene index (inclusive)")
     parser.add_argument("--scene-end", type=int, default=None, help="End scene index (exclusive)")
+    parser.add_argument("--obs-thresh", type=float, default=0.001, help="Observability threshold in [0,1] to max the blue channel")
     args = parser.parse_args()
 
     ds = DatasetPhaseNvisii(args.dataset, args.phase, static_equipment=True, real_assemblies=False)
@@ -554,6 +595,40 @@ def main():
 
     print(f"Loaded dataset at: {args.dataset} | phase: {args.phase} | scenes: {n_scenes}")
     print("Controls: press any key to advance to the next image, 'q' or Esc to quit.")
+
+    # Preload and arrange meshes in memory (no persistent Open3D window)
+    mesh_handle_map = {}
+    mesh_grid_list = []
+    try:
+        mesh_names = ds.get_mesh_names()
+        if isinstance(mesh_names, list) and len(mesh_names) > 0:
+            overall_min = getattr(ds, "overall_mesh_min_bounds", np.array([0.0, 0.0, 0.0], dtype=np.float64))
+            overall_max = getattr(ds, "overall_mesh_max_bounds", np.array([1.0, 1.0, 1.0], dtype=np.float64))
+            # spacing along x and y axes
+            dx = float(max(1e-6, (overall_max[0] - overall_min[0]))) * 1.6
+            dy = float(max(1e-6, (overall_max[1] - overall_min[1]))) * 1.6
+            n = len(mesh_names)
+            cols = int(np.ceil(np.sqrt(n)))
+            rows = int(np.ceil(n / max(1, cols)))
+            for i, name in enumerate(mesh_names):
+                try:
+                    mesh = copy.deepcopy(ds.get_mesh(name))
+                except Exception:
+                    mesh = o3d.io.read_triangle_mesh(os.path.join(args.dataset, "models", name + ".obj"))
+                if not isinstance(mesh, o3d.geometry.TriangleMesh) or not mesh.has_vertices():
+                    continue
+                mesh.compute_vertex_normals()
+                c = i % cols
+                r = i // cols
+                offset = np.array([c * dx, -r * dy, 0.0], dtype=np.float64)
+                # mesh.translate(offset - mesh.get_center())
+                mesh.paint_uniform_color([0.7, 0.7, 0.7])
+                mesh_handle_map[name] = mesh
+                mesh_grid_list.append(mesh)
+    except Exception as e:
+        print(f"Open3D mesh preload failed: {e}")
+        mesh_handle_map = {}
+        mesh_grid_list = []
 
     for s_idx in range(start, end):
         scene = ds.get_scene(s_idx, labeled=True)
@@ -611,10 +686,55 @@ def main():
             cv2.imshow("Segmentation", seg_vis)
             cv2.imshow("Depth (m)", depth_vis)
 
-            key = cv2.waitKey(args.wait if args.wait > 0 else 0) & 0xFF
+            # Show images first and pump GUI events briefly, then open blocking Open3D window
+            key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q"), ord("Q")):
                 cv2.destroyAllWindows()
                 return
+
+            # Colorize meshes based on presence and observability, then draw (blocking)
+            if len(mesh_grid_list) > 0:
+                try:
+                    present_names = set(scene.get_present_equipment_names() or [])
+                except Exception:
+                    present_names = set()
+                obs_dict = scene.get_observability(img_id)
+                obs_map = _parse_observability_map(obs_dict)
+                for name, mesh in mesh_handle_map.items():
+                    present = name in present_names
+                    red = 255 if not present else 0
+                    green = 255 if present else 0
+                    val = obs_map.get(name, None)
+                    observable = False
+                    if isinstance(val, bool):
+                        observable = val
+                    elif isinstance(val, (int, float)):
+                        try:
+                            observable = float(val) >= args.obs_thresh
+                        except Exception:
+                            observable = False
+                    blue = 255 if observable else 0
+                    color = (np.array([red, green, blue], dtype=np.float32) / 255.0).tolist()
+                    try:
+                        mesh.paint_uniform_color(color)
+                    except Exception:
+                        pass
+                try:
+                    # Blocking window; close to proceed to next image
+                    try:
+                        o3d.visualization.draw_geometries(
+                            mesh_grid_list,
+                            window_name="Meshes Observability",
+                            width=960,
+                            height=720,
+                            left=50,
+                            top=50,
+                            mesh_show_back_face=True,
+                        )
+                    except TypeError:
+                        o3d.visualization.draw_geometries(mesh_grid_list)
+                except Exception as e:
+                    print(f"Open3D draw failed: {e}")
 
     print("Visualization complete.")
 
