@@ -631,7 +631,7 @@ def main():
         mesh_grid_list = []
 
     for s_idx in range(start, end):
-        scene = ds.get_scene(s_idx, labeled=True)
+        scene = ds.get_scene(s_idx, labeled=False)
         scene_dir = scene.get_scene_dir_name()
         scene_name = os.path.basename(scene_dir) if isinstance(scene_dir, str) else f"scene_{s_idx}"
         img_ids = scene.get_img_ids()
