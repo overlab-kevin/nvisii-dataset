@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Kevin Murray" }]
 dependencies = [
   "numpy==1.22",
-  "opencv-python-headless",
+  "opencv-python",
   "trimesh",
   "pyyaml",
   "open3d",
